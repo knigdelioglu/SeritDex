@@ -1,5 +1,6 @@
 package tr.seritdex.wm
 
+import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.graphics.Rect
 import android.os.IBinder
@@ -16,6 +17,8 @@ class WindowTaskUserService : IWindowTaskService.Stub() {
     private val intType = Int::class.javaPrimitiveType!!
     private val boolType = Boolean::class.javaPrimitiveType!!
 
+    // The code runs as Shizuku's shell user service, not in the restricted app process.
+    @SuppressLint("BlockedPrivateApi")
     private fun manager(): Any {
         val sm = Class.forName("android.os.ServiceManager")
         val binder = sm.getDeclaredMethod("getService", String::class.java)
