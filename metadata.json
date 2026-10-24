@@ -1,0 +1,6 @@
+{
+  "name": "ŞeritDeX — Galaxy Tab A11+ Pencere Yöneticisi",
+  "description": "Samsung Galaxy Tab A11+ ve DeX modu için Kotlin & Jetpack Compose tabanlı yatay kaydırılabilir şerit pencere yöneticisi, canlı çalışma alanı simülatörü ve tam Android kaynak kodu paketi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
