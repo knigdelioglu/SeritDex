@@ -1418,6 +1418,156 @@ export function computeSpringCurve(
   };
 }
 
+export type ThreeFingerGestureMode =
+  | 'hybrid_pan_and_fling'
+  | 'column_snap_only'
+  | 'free_pan_only';
+
+export type ThreeFingerGestureAction =
+  | 'fling_prev_column'
+  | 'fling_next_column'
+  | 'magnetic_column_snap'
+  | 'free_pan';
+
+export interface ThreeFingerSwipeResolution {
+  nextState: StripWorkspaceState;
+  velocityPxPerSec: number;
+  isFling: boolean;
+  gestureAction: ThreeFingerGestureAction;
+  targetWindowId: string | null;
+  appliedScrollOffsetPx: number;
+}
+
+/**
+ * Real-time 90Hz 3-finger horizontal pan delta application.
+ * Natural touch direction: moving 3 fingers left (negative deltaX) scrolls the camera right (+scrollOffsetPx).
+ */
+export function applyThreeFingerPanDelta(
+  state: StripWorkspaceState,
+  fingerDeltaX: number,
+  sensitivity: number = 1.25
+): StripWorkspaceState {
+  const layout = computeStripLayout(state);
+  const cameraDelta = -Math.round(fingerDeltaX * sensitivity);
+  const nextScroll = clamp(
+    state.scrollOffsetPx + cameraDelta,
+    0,
+    layout.maxScrollOffsetPx
+  );
+  return {
+    ...state,
+    scrollOffsetPx: nextScroll,
+  };
+}
+
+/**
+ * Evaluates a completed 3-finger horizontal swipe/pan gesture:
+ * - High velocity fling (|v| >= 520px/s) or column_snap_only mode steps cleanly to the neighbor column.
+ * - Slow/medium 3-finger pan in hybrid mode magnetically snaps to the column closest to the viewport center.
+ * - free_pan_only preserves the exact continuous scrollOffsetPx.
+ */
+export function resolveThreeFingerSwipeRelease(
+  state: StripWorkspaceState,
+  totalFingerDeltaX: number,
+  durationMs: number,
+  mode: ThreeFingerGestureMode = 'hybrid_pan_and_fling'
+): ThreeFingerSwipeResolution {
+  const safeDurationMs = Math.max(16, durationMs);
+  const velocityPxPerSec = Math.round((totalFingerDeltaX / safeDurationMs) * 1000);
+  const layout = computeStripLayout(state);
+
+  if (layout.placements.length === 0) {
+    return {
+      nextState: state,
+      velocityPxPerSec,
+      isFling: false,
+      gestureAction: 'free_pan',
+      targetWindowId: state.focusedWindowId,
+      appliedScrollOffsetPx: state.scrollOffsetPx,
+    };
+  }
+
+  if (mode === 'free_pan_only') {
+    return {
+      nextState: state,
+      velocityPxPerSec,
+      isFling: false,
+      gestureAction: 'free_pan',
+      targetWindowId: state.focusedWindowId,
+      appliedScrollOffsetPx: state.scrollOffsetPx,
+    };
+  }
+
+  const FLING_VELOCITY_THRESHOLD = 520;
+  const MIN_SWIPE_DISTANCE_PX = 48;
+  const isFling =
+    Math.abs(totalFingerDeltaX) >= MIN_SWIPE_DISTANCE_PX &&
+    (Math.abs(velocityPxPerSec) >= FLING_VELOCITY_THRESHOLD ||
+      mode === 'column_snap_only');
+
+  if (isFling) {
+    // Natural touch: swipe fingers LEFT (totalFingerDeltaX < 0) -> go to NEXT column on the right (+1)
+    // Swipe fingers RIGHT (totalFingerDeltaX > 0) -> go to PREVIOUS column on the left (-1)
+    const direction: -1 | 1 = totalFingerDeltaX < 0 ? 1 : -1;
+    const activeColIdx = state.focusedWindowId
+      ? state.columns.findIndex((c) => c.windowIds.includes(state.focusedWindowId!))
+      : 0;
+    const clampedColIdx = clamp(
+      (activeColIdx === -1 ? 0 : activeColIdx) + direction,
+      0,
+      Math.max(0, state.columns.length - 1)
+    );
+    const targetCol = state.columns[clampedColIdx];
+    const targetWinId =
+      targetCol?.windowIds.find((id) => {
+        const w = state.windows[id];
+        return w && !w.isMinimized && !w.isPinnedPip;
+      }) ??
+      targetCol?.windowIds[0] ??
+      state.focusedWindowId;
+
+    const nextState = targetWinId
+      ? focusWindowAndScroll(state, targetWinId)
+      : cycleFocusHorizontal(state, direction);
+
+    return {
+      nextState,
+      velocityPxPerSec,
+      isFling: true,
+      gestureAction:
+        direction === 1 ? 'fling_next_column' : 'fling_prev_column',
+      targetWindowId: nextState.focusedWindowId,
+      appliedScrollOffsetPx: nextState.scrollOffsetPx,
+    };
+  }
+
+  // Magnetic column snap after continuous 3-finger pan: find column closest to viewport center
+  const viewportCenterStripX =
+    state.scrollOffsetPx + state.config.viewportWidth / 2;
+  let closestPlacement = layout.placements[0];
+  let bestDistance = Infinity;
+
+  for (const p of layout.placements) {
+    const colCenter = (p.stripRect.left + p.stripRect.right) / 2;
+    const dist = Math.abs(colCenter - viewportCenterStripX);
+    if (dist < bestDistance) {
+      bestDistance = dist;
+      closestPlacement = p;
+    }
+  }
+
+  const snappedState = focusWindowAndScroll(state, closestPlacement.windowId);
+  return {
+    nextState: snappedState,
+    velocityPxPerSec,
+    isFling: false,
+    gestureAction: 'magnetic_column_snap',
+    targetWindowId: snappedState.focusedWindowId,
+    appliedScrollOffsetPx: snappedState.scrollOffsetPx,
+  };
+}
+
+
 
 
 

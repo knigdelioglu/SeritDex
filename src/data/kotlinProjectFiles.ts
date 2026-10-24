@@ -242,6 +242,7 @@ class DexAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var windowController: DexWindowController
     private lateinit var overlayManager: StripOverlayManager
+    private lateinit var gestureMonitor: DexThreeFingerGestureMonitor
 
     private val _liveWindows = MutableStateFlow<List<LiveDexWindow>>(emptyList())
     val liveWindows: StateFlow<List<LiveDexWindow>> = _liveWindows.asStateFlow()
@@ -267,7 +268,16 @@ class DexAccessibilityService : AccessibilityService() {
             scope = serviceScope,
             windowController = windowController
         )
+        gestureMonitor = DexThreeFingerGestureMonitor(
+            onThreeFingerPanDelta = { deltaX ->
+                overlayManager.scrollStripByFingerDelta(deltaX)
+            },
+            onThreeFingerRelease = { totalDeltaX, velocityPxPerSec ->
+                overlayManager.resolveThreeFingerGestureEnd(totalDeltaX, velocityPxPerSec)
+            }
+        )
         overlayManager.attachHudOverlay()
+        gestureMonitor.startMonitoring()
         refreshWindowSnapshot()
     }
 
@@ -356,6 +366,7 @@ class DexAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        gestureMonitor.stopMonitoring()
         overlayManager.detachHudOverlay()
         serviceScope.cancel()
         super.onDestroy()
@@ -486,6 +497,166 @@ class DexWindowController(private val context: Context) {
     fun focusTask(taskId: Int) {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         am.moveTaskToFront(taskId, ActivityManager.MOVE_TASK_WITH_HOME)
+    }
+}`
+  },
+  {
+    id: 'dex-three-finger-gesture-kt',
+    path: 'app/src/main/java/tr/seritdex/wm/service/DexThreeFingerGestureMonitor.kt',
+    title: 'DexThreeFingerGestureMonitor.kt',
+    language: 'kotlin',
+    category: 'System Services',
+    summary: 'Shizuku IInputManager.monitorGestureInput ve Trackpad 3-parmak sınıflandırması ile alttaki uygulamaları engellemeden 90Hz şerit kaydırma ve fiske (fling) yakalayıcı.',
+    linesOfCode: 144,
+    content: `package tr.seritdex.wm.service
+
+import android.os.Build
+import android.os.IBinder
+import android.os.Looper
+import android.view.InputChannel
+import android.view.InputEvent
+import android.view.InputEventReceiver
+import android.view.MotionEvent
+import android.view.VelocityTracker
+import rikka.shizuku.ShizukuBinderWrapper
+import rikka.shizuku.SystemServiceHelper
+import kotlin.math.abs
+
+/**
+ * Samsung Galaxy Tab A11+ DeX üzerinde 3 parmakla sağa/sola kaydırmayı
+ * alttaki pencerelerin dokunmatik olaylarını (1 ve 2 parmak) kesmeden yakalar.
+ *
+ * - 3 parmak yavaş/orta hızda sürüklenirken: Şerit kamerası (scrollOffsetPx) 90Hz gerçek zamanlı kayar.
+ * - 3 parmak hızlı fiske (|velocityX| >= 520px/s) ile bırakıldığında: Doğrudan komşu sütuna odaklanır (Hooke yay fiziğiyle).
+ */
+class DexThreeFingerGestureMonitor(
+    private val onThreeFingerPanDelta: (deltaX: Float) -> Unit,
+    private val onThreeFingerRelease: (totalDeltaX: Float, velocityPxPerSec: Float) -> Unit
+) {
+    private var inputChannel: InputChannel? = null
+    private var eventReceiver: ThreeFingerInputReceiver? = null
+    private var velocityTracker: VelocityTracker? = null
+
+    private var isThreeFingerActive = false
+    private var startCentroidX = 0f
+    private var lastCentroidX = 0f
+
+    companion object {
+        private const val DISPLAY_DEFAULT = 0
+        private const val FLING_VELOCITY_THRESHOLD_PX_SEC = 520f
+        private const val MIN_PAN_SLOP_PX = 8f
+    }
+
+    fun startMonitoring(): Boolean {
+        return try {
+            val rawBinder: IBinder = SystemServiceHelper.getSystemService("input") ?: return false
+            val wrappedBinder = ShizukuBinderWrapper(rawBinder)
+            val stubClass = Class.forName("android.hardware.input.IInputManager\\$Stub")
+            val inputManager = stubClass.getMethod("asInterface", IBinder::class.java)
+                .invoke(null, wrappedBinder)
+
+            // IInputManager.monitorGestureInput: Sistem genelinde pasif dokunmatik kanal açar
+            val monitorMethod = inputManager.javaClass.getMethod(
+                "monitorGestureInput",
+                String::class.java,
+                Int::class.javaPrimitiveType
+            )
+            val monitorResult = monitorMethod.invoke(inputManager, "SeritDeX-3FingerMonitor", DISPLAY_DEFAULT)
+            val channelField = monitorResult.javaClass.getDeclaredField("mInputChannel").apply {
+                isAccessible = true
+            }
+            val channel = channelField.get(monitorResult) as? InputChannel ?: return false
+            inputChannel = channel
+            eventReceiver = ThreeFingerInputReceiver(channel, Looper.getMainLooper())
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun stopMonitoring() {
+        eventReceiver?.dispose()
+        eventReceiver = null
+        inputChannel?.dispose()
+        inputChannel = null
+        velocityTracker?.recycle()
+        velocityTracker = null
+    }
+
+    private inner class ThreeFingerInputReceiver(
+        channel: InputChannel,
+        looper: Looper
+    ) : InputEventReceiver(channel, looper) {
+
+        override fun onInputEvent(event: InputEvent) {
+            var handled = false
+            try {
+                if (event is MotionEvent) {
+                    handled = processMotionEvent(event)
+                }
+            } finally {
+                finishInputEvent(event, handled)
+            }
+        }
+    }
+
+    private fun processMotionEvent(event: MotionEvent): Boolean {
+        val isTrackpadThreeFinger = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            event.classification == MotionEvent.CLASSIFICATION_MULTI_FINGER_SWIPE
+
+        val pointerCount = event.pointerCount
+        if (pointerCount < 3 && !isTrackpadThreeFinger && !isThreeFingerActive) {
+            return false
+        }
+
+        val centroidX = computeCentroidX(event)
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_DOWN -> {
+                if (pointerCount == 3 || isTrackpadThreeFinger) {
+                    isThreeFingerActive = true
+                    startCentroidX = centroidX
+                    lastCentroidX = centroidX
+                    velocityTracker?.clear()
+                    velocityTracker = velocityTracker ?: VelocityTracker.obtain()
+                    velocityTracker?.addMovement(event)
+                }
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                if (isThreeFingerActive && (pointerCount >= 3 || isTrackpadThreeFinger)) {
+                    velocityTracker?.addMovement(event)
+                    val deltaX = centroidX - lastCentroidX
+                    if (abs(deltaX) >= MIN_PAN_SLOP_PX) {
+                        onThreeFingerPanDelta(deltaX)
+                        lastCentroidX = centroidX
+                    }
+                    return true
+                }
+            }
+
+            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (isThreeFingerActive) {
+                    velocityTracker?.addMovement(event)
+                    velocityTracker?.computeCurrentVelocity(1000)
+                    val vx = velocityTracker?.xVelocity ?: 0f
+                    val totalDeltaX = lastCentroidX - startCentroidX
+                    isThreeFingerActive = false
+                    onThreeFingerRelease(totalDeltaX, vx)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun computeCentroidX(event: MotionEvent): Float {
+        val count = event.pointerCount.coerceAtLeast(1)
+        var sumX = 0f
+        for (i in 0 until count) {
+            sumX += event.getX(i)
+        }
+        return sumX / count
     }
 }`
   },

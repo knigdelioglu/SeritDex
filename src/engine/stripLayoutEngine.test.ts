@@ -17,6 +17,8 @@ import {
   toggleWindowFullscreen,
   resizeWindowInStrip,
   computeSpringCurve,
+  applyThreeFingerPanDelta,
+  resolveThreeFingerSwipeRelease,
 } from './stripLayoutEngine';
 
 function createSampleState(): StripWorkspaceState {
@@ -277,6 +279,54 @@ test('computeSpringCurve generates underdamped Hooke spring linear() easing with
   const bouncy = computeSpringCurve('elastic_bouncy');
   assert.ok(bouncy.peakOvershootPct > balanced.peakOvershootPct);
 });
+
+test('3-finger gesture engine supports continuous 90Hz pan, fast fling column switch, and slow magnetic snap', () => {
+  const state = createSampleState();
+
+  // 1. Continuous 3-finger pan left (-200px) pulls strip camera right (+250px)
+  const panned = applyThreeFingerPanDelta(state, -200, 1.25);
+  assert.equal(panned.scrollOffsetPx, 250);
+
+  // 2. Fast 3-finger fling left (-240px in 180ms -> -1333px/s) jumps focus from w1 to w2
+  const flingNext = resolveThreeFingerSwipeRelease(
+    state,
+    -240,
+    180,
+    'hybrid_pan_and_fling'
+  );
+  assert.equal(flingNext.isFling, true);
+  assert.equal(flingNext.gestureAction, 'fling_next_column');
+  assert.equal(flingNext.nextState.focusedWindowId, 'w2');
+  assert.ok(flingNext.appliedScrollOffsetPx > 0);
+
+  // 3. Fast 3-finger fling right (+260px in 200ms -> +1300px/s) jumps focus back from w2 to w1
+  const flingPrev = resolveThreeFingerSwipeRelease(
+    flingNext.nextState,
+    260,
+    200,
+    'hybrid_pan_and_fling'
+  );
+  assert.equal(flingPrev.isFling, true);
+  assert.equal(flingPrev.gestureAction, 'fling_prev_column');
+  assert.equal(flingPrev.nextState.focusedWindowId, 'w1');
+  assert.equal(flingPrev.appliedScrollOffsetPx, 0);
+
+  // 4. Slow 3-finger pan release near column 2 magnetically snaps to w2
+  const manuallyPannedNearW2 = {
+    ...state,
+    scrollOffsetPx: 620,
+  };
+  const magneticSnap = resolveThreeFingerSwipeRelease(
+    manuallyPannedNearW2,
+    -40,
+    600,
+    'hybrid_pan_and_fling'
+  );
+  assert.equal(magneticSnap.isFling, false);
+  assert.equal(magneticSnap.gestureAction, 'magnetic_column_snap');
+  assert.equal(magneticSnap.nextState.focusedWindowId, 'w2');
+});
+
 
 
 

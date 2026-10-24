@@ -22,6 +22,9 @@ import {
   unstackEntireGroup,
   toggleWindowFullscreen,
   resizeWindowInStrip,
+  ThreeFingerGestureMode,
+  applyThreeFingerPanDelta,
+  resolveThreeFingerSwipeRelease,
   clamp,
 } from '../engine/stripLayoutEngine';
 import { DOCK_APPS, DockLaunchableApp } from '../data/dexSeedWorkspace';
@@ -44,6 +47,7 @@ import {
   Layers,
   ArrowUpDown,
   Ungroup,
+  Hand,
 } from 'lucide-react';
 
 interface DexLiveStripWorkspaceProps {
@@ -72,6 +76,17 @@ interface ActiveWindowResizeState {
   currentHeightPx: number;
 }
 
+interface ActiveThreeFingerSwipeState {
+  source: 'pointer' | 'touch' | 'synthetic';
+  startClientX: number;
+  lastClientX: number;
+  centroidScreenX: number;
+  centroidScreenY: number;
+  totalDeltaScreenX: number;
+  startedAtMs: number;
+  velocityPxPerSec: number;
+}
+
 const SPRING_PRESET_ORDER: SpringPresetId[] = [
   'dex_90hz_balanced',
   'elastic_bouncy',
@@ -95,12 +110,19 @@ export const DexLiveStripWorkspace: React.FC<DexLiveStripWorkspaceProps> = ({
   const [resizeState, setResizeState] = useState<ActiveWindowResizeState | null>(null);
   const [openContextMenuWinId, setOpenContextMenuWinId] = useState<string | null>(null);
   const [springPresetId, setSpringPresetId] = useState<SpringPresetId>('dex_90hz_balanced');
+  const [threeFingerSimOpen, setThreeFingerSimOpen] = useState(false);
+  const [threeFingerMode, setThreeFingerMode] = useState<ThreeFingerGestureMode>('hybrid_pan_and_fling');
+  const [activeThreeFingerSwipe, setActiveThreeFingerSwipe] =
+    useState<ActiveThreeFingerSwipeState | null>(null);
+  const [lastThreeFingerStatus, setLastThreeFingerStatus] = useState<string | null>(null);
+  const syntheticSwipeTimerRef = useRef<number | null>(null);
 
   const springCurve = computeSpringCurve(springPresetId);
 
   const viewportContainerRef = useRef<HTMLDivElement | null>(null);
   const [viewportScale, setViewportScale] = useState(0.72);
-  const effectiveCanvasHeight = 960; // Fits 100% above the fold at 1440x900 when scaled by 0.725 (~696px)
+  const hasSubPanelOpen = threeFingerSimOpen || snapAssistOpen;
+  const effectiveCanvasHeight = hasSubPanelOpen ? 850 : 960; // Keeps full DeX frame + taskbar 100% above the fold at 1440x900
 
   const effectiveState: StripWorkspaceState = {
     ...state,
@@ -344,6 +366,156 @@ export const DexLiveStripWorkspace: React.FC<DexLiveStripWorkspaceProps> = ({
     window.addEventListener('pointerdown', handlePointerDownOutside);
     return () => window.removeEventListener('pointerdown', handlePointerDownOutside);
   }, [openContextMenuWinId]);
+
+  // Global pointer move / up listeners for 3-Finger Gesture Monitor Simulation
+  useEffect(() => {
+    if (!activeThreeFingerSwipe || activeThreeFingerSwipe.source !== 'pointer') return;
+
+    const handleThreeFingerMove = (e: PointerEvent) => {
+      if (!viewportContainerRef.current) return;
+      const rect = viewportContainerRef.current.getBoundingClientRect();
+      const scale = viewportScale || 0.72;
+
+      const stepDeltaScreenX = Math.round(
+        (e.clientX - activeThreeFingerSwipe.lastClientX) / scale
+      );
+      const totalDeltaScreenX = Math.round(
+        (e.clientX - activeThreeFingerSwipe.startClientX) / scale
+      );
+      const elapsedMs = Math.max(16, performance.now() - activeThreeFingerSwipe.startedAtMs);
+      const velocityPxPerSec = Math.round((totalDeltaScreenX / elapsedMs) * 1000);
+
+      const centroidScreenX = clamp(
+        Math.round((e.clientX - rect.left) / scale),
+        120,
+        state.config.viewportWidth - 120
+      );
+      const centroidScreenY = clamp(
+        Math.round((e.clientY - rect.top) / scale),
+        90,
+        effectiveCanvasHeight - 90
+      );
+
+      setActiveThreeFingerSwipe((prev) =>
+        prev
+          ? {
+              ...prev,
+              lastClientX: e.clientX,
+              centroidScreenX,
+              centroidScreenY,
+              totalDeltaScreenX,
+              velocityPxPerSec,
+            }
+          : null
+      );
+
+      if (Math.abs(stepDeltaScreenX) >= 2 && threeFingerMode !== 'column_snap_only') {
+        setState((prev) => applyThreeFingerPanDelta(prev, stepDeltaScreenX, 1.25));
+      }
+    };
+
+    const handleThreeFingerUp = () => {
+      const elapsedMs = Math.max(
+        16,
+        Math.round(performance.now() - activeThreeFingerSwipe.startedAtMs)
+      );
+      const totalDeltaX = activeThreeFingerSwipe.totalDeltaScreenX;
+
+      if (Math.abs(totalDeltaX) >= 12) {
+        setState((prev) => {
+          const res = resolveThreeFingerSwipeRelease(
+            prev,
+            totalDeltaX,
+            elapsedMs,
+            threeFingerMode
+          );
+          const targetTitle =
+            (res.targetWindowId && res.nextState.windows[res.targetWindowId]?.title.split(' ')[0]) ||
+            'Şerit';
+          const actionLabel =
+            res.gestureAction === 'fling_next_column'
+              ? `3 Parmak Sola Fiske (${res.velocityPxPerSec}px/s) → ${targetTitle}`
+              : res.gestureAction === 'fling_prev_column'
+              ? `3 Parmak Sağa Fiske (+${res.velocityPxPerSec}px/s) → ${targetTitle}`
+              : res.gestureAction === 'magnetic_column_snap'
+              ? `3 Parmak Pan + Manyetik Hizalama → ${targetTitle}`
+              : `3 Parmak Serbest Pan (X=${res.appliedScrollOffsetPx}px)`;
+          setLastThreeFingerStatus(actionLabel);
+          return res.nextState;
+        });
+      }
+      setActiveThreeFingerSwipe(null);
+    };
+
+    window.addEventListener('pointermove', handleThreeFingerMove);
+    window.addEventListener('pointerup', handleThreeFingerUp);
+    return () => {
+      window.removeEventListener('pointermove', handleThreeFingerMove);
+      window.removeEventListener('pointerup', handleThreeFingerUp);
+    };
+  }, [
+    activeThreeFingerSwipe,
+    effectiveCanvasHeight,
+    setState,
+    state.config.viewportWidth,
+    threeFingerMode,
+    viewportScale,
+  ]);
+
+  const handleTriggerSyntheticThreeFingerSwipe = (
+    totalFingerDeltaX: number,
+    durationMs: number
+  ) => {
+    const startX = Math.round(state.config.viewportWidth / 2);
+    const startY = Math.round(effectiveCanvasHeight / 2);
+    const velocity = Math.round((totalFingerDeltaX / Math.max(16, durationMs)) * 1000);
+
+    if (syntheticSwipeTimerRef.current) {
+      window.clearTimeout(syntheticSwipeTimerRef.current);
+    }
+
+    setActiveThreeFingerSwipe({
+      source: 'synthetic',
+      startClientX: startX,
+      lastClientX: startX + totalFingerDeltaX,
+      centroidScreenX: clamp(startX + Math.round(totalFingerDeltaX * 0.35), 220, 1700),
+      centroidScreenY: startY,
+      totalDeltaScreenX: totalFingerDeltaX,
+      startedAtMs: performance.now() - durationMs,
+      velocityPxPerSec: velocity,
+    });
+
+    setState((prev) => {
+      const panned =
+        threeFingerMode === 'column_snap_only'
+          ? prev
+          : applyThreeFingerPanDelta(prev, Math.round(totalFingerDeltaX * 0.45), 1.25);
+      const res = resolveThreeFingerSwipeRelease(
+        panned,
+        totalFingerDeltaX,
+        durationMs,
+        threeFingerMode
+      );
+      const targetTitle =
+        (res.targetWindowId && res.nextState.windows[res.targetWindowId]?.title.split(' ')[0]) ||
+        'Şerit';
+      const actionLabel =
+        res.gestureAction === 'fling_next_column'
+          ? `3 Parmak Sola Fiske (${res.velocityPxPerSec}px/s) → ${targetTitle}`
+          : res.gestureAction === 'fling_prev_column'
+          ? `3 Parmak Sağa Fiske (+${res.velocityPxPerSec}px/s) → ${targetTitle}`
+          : res.gestureAction === 'magnetic_column_snap'
+          ? `3 Parmak Pan + Manyetik Hizalama → ${targetTitle}`
+          : `3 Parmak Serbest Pan (X=${res.appliedScrollOffsetPx}px)`;
+      setLastThreeFingerStatus(actionLabel);
+      return res.nextState;
+    });
+
+    syntheticSwipeTimerRef.current = window.setTimeout(() => {
+      setActiveThreeFingerSwipe(null);
+      syntheticSwipeTimerRef.current = null;
+    }, 1400);
+  };
 
   const handleStartWindowDrag = (
     e: React.PointerEvent,
@@ -710,6 +882,20 @@ export const DexLiveStripWorkspace: React.FC<DexLiveStripWorkspaceProps> = ({
 
           <button
             type="button"
+            data-testid="three-finger-mode-toggle"
+            onClick={() => setThreeFingerSimOpen((v) => !v)}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+              threeFingerSimOpen
+                ? 'bg-violet-600/30 border-violet-400 text-violet-200'
+                : 'bg-violet-950/50 hover:bg-violet-900/50 border-violet-500/40 text-violet-300'
+            }`}
+          >
+            <Hand className="w-3.5 h-3.5" />
+            3 Parmak Kaydır
+          </button>
+
+          <button
+            type="button"
             data-testid="spring-preset-toggle-btn"
             onClick={() => {
               const nextIdx =
@@ -1071,6 +1257,85 @@ export const DexLiveStripWorkspace: React.FC<DexLiveStripWorkspaceProps> = ({
         </div>
       )}
 
+      {/* 3-Finger Swipe Shizuku IInputManager Panel (When Open) */}
+      {threeFingerSimOpen && (
+        <div
+          className="p-3 rounded-lg bg-slate-900/95 border border-violet-500/40 flex flex-wrap items-center justify-between gap-3 text-xs"
+          data-testid="three-finger-gesture-panel"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <Hand className="w-4 h-4 text-violet-400 shrink-0" />
+            <span>
+              <strong>3 Parmak Kaydırma (Shizuku IInputManager.monitorGestureInput):</strong>{' '}
+              Bu panel açıkken DeX ekranının herhangi bir yerinde fareyle sürükleyerek (veya tablette 3 parmakla dokunarak) şeridi kaydırabilirsiniz.
+            </span>
+            {lastThreeFingerStatus && (
+              <span
+                data-testid="three-finger-status-badge"
+                className="px-2 py-0.5 rounded bg-violet-950 border border-violet-500/50 font-mono text-[11px] text-violet-200"
+              >
+                {lastThreeFingerStatus}
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Gesture Mode Selector */}
+            <div className="flex items-center gap-1 bg-slate-950 px-2 py-1 rounded border border-slate-800">
+              <span className="font-mono text-[11px] text-slate-400 mr-1">Mod:</span>
+              {(
+                [
+                  { id: 'hybrid_pan_and_fling', label: 'Hibrit (90Hz Pan + Fiske)' },
+                  { id: 'column_snap_only', label: 'Sadece Sütun Geçişi' },
+                  { id: 'free_pan_only', label: 'Serbest Pan' },
+                ] as { id: ThreeFingerGestureMode; label: string }[]
+              ).map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => setThreeFingerMode(m.id)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors whitespace-nowrap ${
+                    threeFingerMode === m.id
+                      ? 'bg-violet-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Instant 3-Finger Gesture Test Triggers */}
+            <button
+              type="button"
+              data-testid="three-finger-fling-right-btn"
+              onClick={() => handleTriggerSyntheticThreeFingerSwipe(260, 175)}
+              className="px-2.5 py-1 rounded bg-violet-600/20 hover:bg-violet-600/40 border border-violet-500/40 text-violet-200 font-medium transition-colors whitespace-nowrap"
+            >
+              ← 3 Parmak Sağa Fiske (Önceki Sütun)
+            </button>
+
+            <button
+              type="button"
+              data-testid="three-finger-fling-left-btn"
+              onClick={() => handleTriggerSyntheticThreeFingerSwipe(-260, 175)}
+              className="px-2.5 py-1 rounded bg-violet-600/20 hover:bg-violet-600/40 border border-violet-500/40 text-violet-200 font-medium transition-colors whitespace-nowrap"
+            >
+              3 Parmak Sola Fiske (Sonraki Sütun) →
+            </button>
+
+            <button
+              type="button"
+              data-testid="three-finger-slow-pan-btn"
+              onClick={() => handleTriggerSyntheticThreeFingerSwipe(-180, 620)}
+              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-medium transition-colors whitespace-nowrap"
+            >
+              Yavaş 3 Parmak Pan + Manyetik Hizala
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Galaxy Tab A11+ WUXGA Interactive DeX Frame */}
       <div
         ref={viewportContainerRef}
@@ -1081,7 +1346,144 @@ export const DexLiveStripWorkspace: React.FC<DexLiveStripWorkspaceProps> = ({
             handleScrollDelta(delta * 1.4);
           }
         }}
-        className="relative w-full rounded-xl border border-slate-800 bg-[#070A10] overflow-hidden shadow-2xl select-none"
+        onPointerDownCapture={(e) => {
+          // Activate 3-finger gesture simulation when 3-Finger panel is open (and not clicking a button) or Shift+Drag
+          const targetEl = e.target as HTMLElement | null;
+          if (targetEl?.closest('button, input, a, [role="menuitem"], [role="separator"]')) {
+            return;
+          }
+          if (threeFingerSimOpen || e.shiftKey) {
+            e.stopPropagation();
+            if (!viewportContainerRef.current) return;
+            const rect = viewportContainerRef.current.getBoundingClientRect();
+            const scale = viewportScale || 0.72;
+            const centroidScreenX = clamp(
+              Math.round((e.clientX - rect.left) / scale),
+              120,
+              state.config.viewportWidth - 120
+            );
+            const centroidScreenY = clamp(
+              Math.round((e.clientY - rect.top) / scale),
+              90,
+              effectiveCanvasHeight - 90
+            );
+            setActiveThreeFingerSwipe({
+              source: 'pointer',
+              startClientX: e.clientX,
+              lastClientX: e.clientX,
+              centroidScreenX,
+              centroidScreenY,
+              totalDeltaScreenX: 0,
+              startedAtMs: performance.now(),
+              velocityPxPerSec: 0,
+            });
+          }
+        }}
+        onTouchStart={(e) => {
+          if (e.touches.length === 3 && viewportContainerRef.current) {
+            const rect = viewportContainerRef.current.getBoundingClientRect();
+            const scale = viewportScale || 0.72;
+            const avgClientX =
+              (e.touches[0].clientX + e.touches[1].clientX + e.touches[2].clientX) / 3;
+            const avgClientY =
+              (e.touches[0].clientY + e.touches[1].clientY + e.touches[2].clientY) / 3;
+            setActiveThreeFingerSwipe({
+              source: 'touch',
+              startClientX: avgClientX,
+              lastClientX: avgClientX,
+              centroidScreenX: clamp(
+                Math.round((avgClientX - rect.left) / scale),
+                120,
+                state.config.viewportWidth - 120
+              ),
+              centroidScreenY: clamp(
+                Math.round((avgClientY - rect.top) / scale),
+                90,
+                effectiveCanvasHeight - 90
+              ),
+              totalDeltaScreenX: 0,
+              startedAtMs: performance.now(),
+              velocityPxPerSec: 0,
+            });
+          }
+        }}
+        onTouchMove={(e) => {
+          if (e.touches.length === 3 && activeThreeFingerSwipe && viewportContainerRef.current) {
+            const rect = viewportContainerRef.current.getBoundingClientRect();
+            const scale = viewportScale || 0.72;
+            const avgClientX =
+              (e.touches[0].clientX + e.touches[1].clientX + e.touches[2].clientX) / 3;
+            const avgClientY =
+              (e.touches[0].clientY + e.touches[1].clientY + e.touches[2].clientY) / 3;
+            const stepDeltaScreenX = Math.round(
+              (avgClientX - activeThreeFingerSwipe.lastClientX) / scale
+            );
+            const totalDeltaScreenX = Math.round(
+              (avgClientX - activeThreeFingerSwipe.startClientX) / scale
+            );
+            const elapsedMs = Math.max(
+              16,
+              performance.now() - activeThreeFingerSwipe.startedAtMs
+            );
+            const velocityPxPerSec = Math.round((totalDeltaScreenX / elapsedMs) * 1000);
+
+            setActiveThreeFingerSwipe((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    lastClientX: avgClientX,
+                    centroidScreenX: clamp(
+                      Math.round((avgClientX - rect.left) / scale),
+                      120,
+                      state.config.viewportWidth - 120
+                    ),
+                    centroidScreenY: clamp(
+                      Math.round((avgClientY - rect.top) / scale),
+                      90,
+                      effectiveCanvasHeight - 90
+                    ),
+                    totalDeltaScreenX,
+                    velocityPxPerSec,
+                  }
+                : null
+            );
+
+            if (Math.abs(stepDeltaScreenX) >= 2 && threeFingerMode !== 'column_snap_only') {
+              setState((prev) => applyThreeFingerPanDelta(prev, stepDeltaScreenX, 1.25));
+            }
+          }
+        }}
+        onTouchEnd={() => {
+          if (activeThreeFingerSwipe) {
+            const elapsedMs = Math.max(
+              16,
+              Math.round(performance.now() - activeThreeFingerSwipe.startedAtMs)
+            );
+            const totalDeltaX = activeThreeFingerSwipe.totalDeltaScreenX;
+            if (Math.abs(totalDeltaX) >= 12) {
+              setState((prev) => {
+                const res = resolveThreeFingerSwipeRelease(
+                  prev,
+                  totalDeltaX,
+                  elapsedMs,
+                  threeFingerMode
+                );
+                const targetTitle =
+                  (res.targetWindowId &&
+                    res.nextState.windows[res.targetWindowId]?.title.split(' ')[0]) ||
+                  'Şerit';
+                setLastThreeFingerStatus(
+                  `3 Parmak Hareketi (${res.velocityPxPerSec}px/s) → ${targetTitle}`
+                );
+                return res.nextState;
+              });
+            }
+            setActiveThreeFingerSwipe(null);
+          }
+        }}
+        className={`relative w-full rounded-xl border bg-[#070A10] overflow-hidden shadow-2xl select-none ${
+          threeFingerSimOpen ? 'border-violet-500/70 cursor-ew-resize' : 'border-slate-800'
+        }`}
         style={{
           height: `${Math.round(effectiveCanvasHeight * viewportScale)}px`,
         }}
@@ -1791,6 +2193,52 @@ export const DexLiveStripWorkspace: React.FC<DexLiveStripWorkspaceProps> = ({
                     {liveDragSnapTarget.previewStripRect.right},{' '}
                     {liveDragSnapTarget.previewStripRect.bottom}] · Spring (k=
                     {springCurve.stiffness}, c={springCurve.damping})
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 2D. 3-Finger Shizuku IInputManager Touch Contact Points & Velocity HUD */}
+            {activeThreeFingerSwipe && (
+              <div
+                data-testid="three-finger-touch-overlay"
+                style={{
+                  transform: `translate3d(${activeThreeFingerSwipe.centroidScreenX}px, ${activeThreeFingerSwipe.centroidScreenY}px, 0)`,
+                }}
+                className="absolute top-0 left-0 z-50 -translate-x-1/2 -translate-y-1/2 pointer-events-none flex flex-col items-center gap-3"
+              >
+                {/* 3 Synchronized Capacitive Touch Points */}
+                <div className="flex items-center gap-8">
+                  {[
+                    { idx: 1, offsetY: -10 },
+                    { idx: 2, offsetY: -22 },
+                    { idx: 3, offsetY: -8 },
+                  ].map((finger) => (
+                    <div
+                      key={finger.idx}
+                      style={{ transform: `translateY(${finger.offsetY}px)` }}
+                      className="w-12 h-12 rounded-full bg-violet-500/35 border-2 border-violet-300 shadow-[0_0_24px_rgba(139,92,246,0.75)] flex items-center justify-center font-mono text-xs font-bold text-white"
+                    >
+                      P{finger.idx}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Live IInputManager Gesture Telemetry Pill */}
+                <div className="px-3.5 py-2 rounded-xl bg-slate-950/95 border border-violet-400 shadow-2xl text-center space-y-0.5 whitespace-nowrap">
+                  <div className="text-xs font-bold text-violet-200 flex items-center justify-center gap-1.5">
+                    <Hand className="w-3.5 h-3.5 text-violet-400" />
+                    <span>
+                      IInputManager · 3 Parmak Kaydırma (pointerCount=3)
+                    </span>
+                  </div>
+                  <div className="font-mono tabular-nums text-[11px] text-slate-300">
+                    ΔX: {activeThreeFingerSwipe.totalDeltaScreenX > 0 ? '+' : ''}
+                    {activeThreeFingerSwipe.totalDeltaScreenX}px · Hız:{' '}
+                    {activeThreeFingerSwipe.velocityPxPerSec}px/s ·{' '}
+                    {Math.abs(activeThreeFingerSwipe.velocityPxPerSec) >= 520
+                      ? 'Fiske (Sütun Geçişi)'
+                      : '90Hz Kamera Pan'}
                   </div>
                 </div>
               </div>
