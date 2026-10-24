@@ -12,6 +12,9 @@ import android.widget.TextView
 class DexHud(private val service: DexAccessibilityService) {
     private val wm = service.getSystemService(WindowManager::class.java)
     private var panel: LinearLayout? = null
+    private val arrows = mutableListOf<TextView>()
+    private var currentLabel: TextView? = null
+    private var fallbackWindow: LiveWindow? = null
     private fun dp(n: Int) = (n * service.resources.displayMetrics.density).toInt()
 
     private fun pill(label: String, tap: () -> Unit): TextView =
@@ -39,49 +42,65 @@ class DexHud(private val service: DexAccessibilityService) {
             }
             elevation = dp(8).toFloat()
         }
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT, dp(52),
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(22) }
-        runCatching { wm.addView(view, params); panel = view }
-    }
-
-    fun render(windows: List<LiveWindow>) {
-        val parent = panel ?: return
-        parent.removeAllViews()
-        parent.addView(pill("ŞeritDeX") {
+        view.addView(pill("ŞeritDeX") {
             service.packageManager.getLaunchIntentForPackage(service.packageName)?.let {
                 it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                 runCatching { service.startActivity(it) }
             }
         })
+        arrows.clear()
+        listOf("◀" to -1, "▶" to 1).forEach { (label, direction) ->
+            val arrow = pill(label) { service.navigate(direction) }.apply {
+                contentDescription = if (direction < 0) "Önceki pencere" else "Sonraki pencere"
+            }
+            arrows.add(arrow)
+            view.addView(arrow, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(5) })
+        }
+        currentLabel = pill("Pencere yok") {
+            if (ShizukuStripController.connected.value && ShizukuStripController.tasks.value.isNotEmpty()) {
+                ShizukuStripController.refresh()
+            } else {
+                fallbackWindow?.let { AppLauncher.open(service, it.packageName, 0.5f) }
+            }
+        }.apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        view.addView(currentLabel, LinearLayout.LayoutParams(dp(136), dp(36)).apply { leftMargin = dp(6) })
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT, dp(64),
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(58) }
+        runCatching { wm.addView(view, params); panel = view }
+    }
+
+    fun render(windows: List<LiveWindow>) {
+        if (panel == null) return
+        fallbackWindow = windows.firstOrNull { it.focused } ?: windows.firstOrNull()
+        val canNavigate = windows.isNotEmpty() ||
+            (ShizukuStripController.connected.value && ShizukuStripController.tasks.value.isNotEmpty())
+        arrows.forEach {
+            it.isEnabled = canNavigate
+            it.alpha = if (canNavigate) 1f else 0.4f
+        }
         if (ShizukuStripController.connected.value && ShizukuStripController.tasks.value.isNotEmpty()) {
-            val left = pill("◀") { ShizukuStripController.step(-1) }
-            parent.addView(left, LinearLayout.LayoutParams(dp(38), dp(36)).apply { leftMargin = dp(5) })
-            val right = pill("▶") { ShizukuStripController.step(1) }
-            parent.addView(right, LinearLayout.LayoutParams(dp(38), dp(36)).apply { leftMargin = dp(5) })
             val label = ShizukuStripController.tasks.value.getOrNull(
                 ShizukuStripController.focusedIndex.value
             )?.packageName?.substringAfterLast('.') ?: "Şerit"
-            parent.addView(pill(label.take(16)) { ShizukuStripController.refresh() },
-                LinearLayout.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT, dp(36)).apply {
-                    leftMargin = dp(6)
-                })
+            val position = "${ShizukuStripController.focusedIndex.value + 1}/${ShizukuStripController.tasks.value.size}"
+            currentLabel?.text = "${label.take(12)} $position"
             return
         }
-        windows.take(4).forEach { window ->
-            val button = pill(window.title.take(14)) { AppLauncher.open(service, window.packageName, 0.5f) }
-            val params = LinearLayout.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT, dp(36)
-            ).apply { leftMargin = dp(6) }
-            parent.addView(button, params)
-        }
+        currentLabel?.text = fallbackWindow?.title?.take(14) ?: "Pencere yok"
     }
 
     fun hide() {
         panel?.let { runCatching { wm.removeView(it) } }
         panel = null
+        arrows.clear()
+        currentLabel = null
+        fallbackWindow = null
     }
 }

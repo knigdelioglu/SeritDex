@@ -18,11 +18,19 @@ Android Accessibility cannot reposition another app's task. To test actual task 
 4. Select **Şeridi uygula** and move left/right from the main screen or bottom HUD.
 5. Tap **Kurtar** to restore the original bounds if movement fails.
 
-The experimental Android 16 bridge runs as a Shizuku user service with shell privileges. It reads live task IDs, computes an unbounded virtual horizontal strip, requests task bounds through IActivityTaskManager, and attempts edge parking. It checks the actual bounds after each request and reports rejected or clamped moves. Android / One UI may reject this entirely. This is **not yet validated on a real tablet**. Samsung DeX One UI 8 may minimize tasks beyond five. Privileged action is opt-in.
+The experimental Android 16 bridge runs as a Shizuku user service with shell privileges. It reads desktop task IDs and computes a virtual horizontal strip while keeping requested windows inside the display. Windows outside the current strip viewport stack behind the selected windows; persistent HUD arrows bring them back into view. The bridge reconnects after an app restart only if Shizuku permission has already been granted. It checks actual bounds after each request, reanchors windows enlarged by OEM minimum sizes, and reports rejected or clamped moves. Android / One UI may reject moves. Samsung DeX One UI 8 may minimize tasks beyond five. Privileged action is opt-in.
 
 ## Honest platform limits
 
-`ActivityOptions.setLaunchBounds` supplies **new launch bounds**, not live task resizing. Android/One UI may ignore those hints. Privileged IActivityTaskManager control is experimental and not device-verified. Global three-finger gestures are not implemented. Those are concepts in the web prototype, not shipping features.
+New launches request the leftmost free horizontal space based on accessibility-visible windows, or the least overlapping position if the screen is full. Enable accessibility for this placement hint to account for existing windows. Reopening a visible app preserves its observed bounds. This does not automatically rearrange other windows; use the Shizuku strip controls for that.
+
+`ActivityOptions.setLaunchBounds` supplies **new launch bounds**, not live task resizing. Android/One UI may ignore those hints. Privileged IActivityTaskManager control is experimental and OEM-dependent. Global three-finger gestures are not implemented. Those are concepts in the web prototype, not shipping features.
+
+### Device verification (v0.2.2, 24 October 2026)
+
+On SM-X230, verified six desktop tasks (including separate Google and Gemini tasks): navigation from Home after fullscreen, restoring minimized tasks, left/right navigation, and wrapping from the last task to the first. Actual bounds stayed within the 1920 × 1200 display during these checks. Eight local unit tests passed. This confirms the tested workflow on this device, not support for all One UI versions.
+
+A separate offscreen experiment requested a window starting at x=1920. One UI clamped it to x=1857, leaving 63 pixels visible. Fullscreen followed by Home did not remove that clamp in this test. The shipped layout therefore keeps actual windows inside the display and brings the selected pair forward. Shizuku bridge replacements use its reserved destroy transaction so outdated service processes can exit.
 
 ## Signing
 

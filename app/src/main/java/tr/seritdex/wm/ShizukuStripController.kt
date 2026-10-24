@@ -26,7 +26,8 @@ object ShizukuStripController {
     val tasks = MutableStateFlow<List<ManagedTask>>(emptyList())
     val focusedIndex = MutableStateFlow(0)
     val widthFraction = MutableStateFlow(0.5f)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
     private var remote: IWindowTaskService? = null
     private val originals = mutableMapOf<Int, Rect>()
     private var requested = false
@@ -52,6 +53,7 @@ object ShizukuStripController {
             connected.value = false
             tasks.value = emptyList()
             status.value = "Shizuku hizmet bağlantısı kesildi"
+            DexAccessibilityService.active?.updateHud()
         }
     }
 
@@ -82,7 +84,7 @@ object ShizukuStripController {
         try {
             val args = Shizuku.UserServiceArgs(
                 ComponentName(context.packageName, WindowTaskUserService::class.java.name)
-            ).daemon(false).processNameSuffix("strip").tag("seritdex-task-control").version(2)
+            ).daemon(false).processNameSuffix("strip").tag("seritdex-task-control").version(8)
             Shizuku.bindUserService(args, connection)
             requested = true
             status.value = "Sistem görev servisine bağlanılıyor"
@@ -92,7 +94,7 @@ object ShizukuStripController {
         }
     }
 
-    fun refresh() {
+    fun refresh(reportStatus: Boolean = true) {
         val service = remote ?: return
         scope.launch {
             try {
@@ -109,12 +111,18 @@ object ShizukuStripController {
                     val rect = Rect(obj.getInt("left"), obj.getInt("top"),
                         obj.getInt("right"), obj.getInt("bottom"))
                     ManagedTask(id, obj.getString("packageName"), obj.getString("title"), rect)
-                }.distinctBy { it.id }.take(5)
+                }.distinctBy { it.id }
+                val previous = tasks.value
+                val selectedId = previous.getOrNull(focusedIndex.value)?.id
+                val ordered = previous.mapNotNull { old -> result.find { it.id == old.id } } +
+                    result.filter { candidate -> previous.none { it.id == candidate.id } }.reversed()
                 result.forEach { if (!originals.containsKey(it.id) && !it.initialBounds.isEmpty) originals[it.id] = Rect(it.initialBounds) }
-                tasks.value = result
-                focusedIndex.value = focusedIndex.value.coerceIn(0, (result.size - 1).coerceAtLeast(0))
-                status.value = if (result.isEmpty()) "Yönetilebilir açık görev bulunamadı" else
-                    result.size.toString() + " görev bulundu. Şeridi uygula ile pencere taşıma denenebilir."
+                tasks.value = ordered
+                focusedIndex.value = ordered.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
+                if (reportStatus) {
+                    status.value = if (result.isEmpty()) "Yönetilebilir açık görev bulunamadı" else
+                        result.size.toString() + " görev bulundu. Şeridi uygula ile pencere taşıma denenebilir."
+                }
                 DexAccessibilityService.active?.updateHud()
             } catch (e: Throwable) {
                 status.value = "Sistem görevleri okunamadı: " + (e.message ?: "bilinmiyor")
@@ -124,7 +132,7 @@ object ShizukuStripController {
 
     fun step(direction: Int) {
         if (!connected.value || tasks.value.isEmpty()) return
-        focusedIndex.value = (focusedIndex.value + direction).coerceIn(0, tasks.value.lastIndex)
+        focusedIndex.value = (focusedIndex.value + direction + tasks.value.size) % tasks.value.size
         apply()
     }
 
@@ -139,24 +147,36 @@ object ShizukuStripController {
                 val display = context.getSystemService(DisplayManager::class.java)
                     .getDisplay(Display.DEFAULT_DISPLAY)
                 val size = Point().also { display?.getRealSize(it) }
+                val viewportWidth = size.x.takeIf { it > 0 } ?: 1920
+                val viewportHeight = size.y.takeIf { it > 0 } ?: 1200
                 val placements = StripLayout.placements(
                     taskIds = snapshot.map { it.id },
-                    viewportWidth = size.x.takeIf { it > 0 } ?: 1920,
-                    viewportHeight = size.y.takeIf { it > 0 } ?: 1200,
+                    viewportWidth = viewportWidth,
+                    viewportHeight = viewportHeight,
                     focusedIndex = selected,
                     fraction = widthFraction.value
                 )
+                placements.forEach { item ->
+                    val r = item.requestedBounds
+                    service.resizeTask(item.taskId, r.left, r.top, r.right, r.bottom,
+                            viewportWidth, viewportHeight)
+                }
+                placements.filter { !it.parked && it.taskId != snapshot[selected].id }
+                    .forEach { service.focusTask(it.taskId) }
+                val focused = service.focusTask(snapshot[selected].id)
+                // Restoring a minimized DeX task can replace its saved bounds.
+                // Apply and verify the final positions after bringing tasks forward.
                 var applied = 0
                 placements.forEach { item ->
                     val r = item.requestedBounds
-                    if (service.resizeTask(item.taskId, r.left, r.top, r.right, r.bottom)) applied++
+                    if (service.resizeTask(item.taskId, r.left, r.top, r.right, r.bottom,
+                            viewportWidth, viewportHeight)) applied++
                 }
-                val focused = service.focusTask(snapshot[selected].id)
                 status.value = if (applied == placements.size) {
                     "Şerit uygulandı. " + applied + " pencere yeniden konumlandırıldı."
                 } else {
                     "DeX bazı konumları reddetti/sınırladı: " + applied +
-                        "/" + placements.size + " görev. Gerçek ŞeritMac davranışı doğrulanmadı."
+                        "/" + placements.size + " görev. Oklarla tüm pencerelere geçebilirsiniz."
                 }
                 if (!focused) status.value += " Odak değişimi engellendi."
                 DexAccessibilityService.active?.updateHud()
@@ -171,10 +191,14 @@ object ShizukuStripController {
         val snapshots = tasks.value
         val saved = snapshots.associate { it.id to originals[it.id] }
         scope.launch {
+            val display = appContext?.getSystemService(DisplayManager::class.java)
+                ?.getDisplay(Display.DEFAULT_DISPLAY)
+            val size = Point().also { display?.getRealSize(it) }
             var count = 0
             snapshots.forEach { task ->
                 val rect = saved[task.id] ?: return@forEach
-                if (!rect.isEmpty && service.resizeTask(task.id, rect.left, rect.top, rect.right, rect.bottom)) count++
+                if (!rect.isEmpty && service.resizeTask(task.id, rect.left, rect.top, rect.right, rect.bottom,
+                        size.x.takeIf { it > 0 } ?: 1920, size.y.takeIf { it > 0 } ?: 1200)) count++
             }
             status.value = "Önceki konuma kurtarılan pencere: " + count + "/" + snapshots.size
         }

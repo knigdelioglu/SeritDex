@@ -10,8 +10,8 @@ android {
         applicationId = "tr.seritdex.wm"
         minSdk = 36
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2.0-experimental"
+        versionCode = 4
+        versionName = "0.2.2-experimental"
     }
     buildTypes {
         release {

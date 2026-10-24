@@ -23,10 +23,6 @@ object AppState {
     val windows = MutableStateFlow<List<LiveWindow>>(emptyList())
     val hudVisible = MutableStateFlow(true)
 }
-object WindowSizing {
-    fun targetWidth(displayWidth: Int, ratio: Float): Int =
-        (displayWidth.coerceAtLeast(1) * ratio.coerceIn(0.3333f, 1f)).toInt().coerceAtLeast(1)
-}
 object AppLauncher {
     fun installedApps(context: Context): List<LaunchableApp> {
         val query = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -49,9 +45,20 @@ object AppLauncher {
             val width = point.x.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
             val height = point.y.takeIf { it > 0 } ?: context.resources.displayMetrics.heightPixels
             val target = WindowSizing.targetWidth(width, ratio)
-            val left = ((width - target) / 2).coerceAtLeast(0)
+            val windows = AppState.windows.value
+            val existing = windows.firstOrNull { it.packageName == packageName && !it.bounds.isEmpty }
+            val left = WindowSizing.targetLeft(width, target, windows.map { it.bounds.left to it.bounds.right })
             val options = ActivityOptions.makeBasic()
-            options.launchBounds = Rect(left, 0, left + target, height)
+            // Switching to an open app must preserve a manually arranged window.
+            options.launchBounds = existing?.bounds?.let {
+                Rect(it).apply {
+                    right = left + width().coerceAtMost(width)
+                    bottom = top + height().coerceAtMost(height)
+                    offsetTo(left.coerceIn(0, (width - width()).coerceAtLeast(0)),
+                        top.coerceIn(0, (height - height()).coerceAtLeast(0)))
+                }
+            }
+                ?: Rect(left, 0, left + target, height)
             context.startActivity(launch, options.toBundle())
             null
         } catch (e: Exception) {
