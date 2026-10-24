@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ŞeritDeX</string>
+    <string name="accessibility_label">ŞeritDeX Pencere Erişimi</string>
+    <string name="accessibility_description">DeX pencerelerini listeler, alt HUD ile hızlı geçiş sağlar ve isteğe bağlı fiziksel klavye kısayollarını işler. Veriler cihazdan ayrılmaz.</string>
+</resources>
