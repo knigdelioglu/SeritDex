@@ -9,9 +9,20 @@ The repository contains a React/Vite design prototype in `src/` and a separate K
 - To build: `gradle :app:testDebugUnitTest :app:assembleRelease`
 - Successful main pushes publish an APK prerelease through [Releases](https://github.com/knigdelioglu/SeritDex/releases).
 
+## Experimental horizontal strip (v0.2.0)
+
+Android Accessibility cannot reposition another app's task. To test actual task movement:
+1. Open two or more apps in separate Samsung DeX windows.
+2. Install [Shizuku](https://shizuku.rikka.app/download/) and start its ADB service using wireless debugging.
+3. In ŞeritDeX, tap **Shizuku bağla**, authorize it, then **Pencereleri bul**.
+4. Select **Şeridi uygula** and move left/right from the main screen or bottom HUD.
+5. Tap **Kurtar** to restore the original bounds if movement fails.
+
+The experimental Android 16 bridge runs as a Shizuku user service with shell privileges. It reads live task IDs, computes an unbounded virtual horizontal strip, requests task bounds through IActivityTaskManager, and attempts edge parking. It checks the actual bounds after each request and reports rejected or clamped moves. Android / One UI may reject this entirely. This is **not yet validated on a real tablet**. Samsung DeX One UI 8 may minimize tasks beyond five. Privileged action is opt-in.
+
 ## Honest platform limits
 
-`ActivityOptions.setLaunchBounds` supplies **new launch bounds**, not live task resizing. Android/One UI may ignore those hints. Direct IActivityTaskManager control, global three-finger gestures and Shizuku integration are **not implemented or verified** in this native baseline. Those are concepts in the web prototype, not shipping features.
+`ActivityOptions.setLaunchBounds` supplies **new launch bounds**, not live task resizing. Android/One UI may ignore those hints. Privileged IActivityTaskManager control is experimental and not device-verified. Global three-finger gestures are not implemented. Those are concepts in the web prototype, not shipping features.
 
 ## Signing
 

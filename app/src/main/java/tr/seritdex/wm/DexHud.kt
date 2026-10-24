@@ -57,6 +57,20 @@ class DexHud(private val service: DexAccessibilityService) {
                 runCatching { service.startActivity(it) }
             }
         })
+        if (ShizukuStripController.connected.value && ShizukuStripController.tasks.value.isNotEmpty()) {
+            val left = pill("◀") { ShizukuStripController.step(-1) }
+            parent.addView(left, LinearLayout.LayoutParams(dp(38), dp(36)).apply { leftMargin = dp(5) })
+            val right = pill("▶") { ShizukuStripController.step(1) }
+            parent.addView(right, LinearLayout.LayoutParams(dp(38), dp(36)).apply { leftMargin = dp(5) })
+            val label = ShizukuStripController.tasks.value.getOrNull(
+                ShizukuStripController.focusedIndex.value
+            )?.packageName?.substringAfterLast('.') ?: "Şerit"
+            parent.addView(pill(label.take(16)) { ShizukuStripController.refresh() },
+                LinearLayout.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT, dp(36)).apply {
+                    leftMargin = dp(6)
+                })
+            return
+        }
         windows.take(4).forEach { window ->
             val button = pill(window.title.take(14)) { AppLauncher.open(service, window.packageName, 0.5f) }
             val params = LinearLayout.LayoutParams(
