@@ -141,9 +141,10 @@ export function computeColumnWidthPx(
   config: StripWorkspaceConfig
 ): number {
   const usableWidth = config.viewportWidth - config.outerMarginPx * 2;
+  const minWidth = Math.min(380, usableWidth);
   if (column.customWidthRatio !== undefined) {
-    const clampedRatio = clamp(column.customWidthRatio, 0.25, 1.0);
-    return clamp(Math.round(usableWidth * clampedRatio), 380, usableWidth);
+    const clampedRatio = clamp(column.customWidthRatio, minWidth / usableWidth, 1.0);
+    return clamp(Math.round(usableWidth * clampedRatio), minWidth, usableWidth);
   }
 
   const ratio = presetToRatio(column.widthPreset);
@@ -159,7 +160,7 @@ export function computeColumnWidthPx(
       ? Math.round((config.columnGapPx * 2) / 3)
       : Math.round(config.columnGapPx / 2);
 
-  return Math.max(380, Math.round(usableWidth * ratio - gapCompensation));
+  return clamp(Math.round(usableWidth * ratio - gapCompensation), minWidth, usableWidth);
 }
 
 export function computeStripLayout(state: StripWorkspaceState): ComputedStripLayout {
@@ -424,6 +425,7 @@ export function focusWindowAndScroll(
     [targetWindowId]: {
       ...targetWin,
       isMinimized: false,
+      isPinnedPip: false,
       lastFocusedAt: Date.now(),
     },
   };
@@ -1203,9 +1205,10 @@ export function resizeWindowInStrip(
     viewportWorkHeightPx ?? defaultUsableBottomPx - usableTopPx
   );
 
-  const clampedWidthPx = clamp(Math.round(newWidthPx), 380, usableWidth);
+  const minWidth = Math.min(380, usableWidth);
+  const clampedWidthPx = clamp(Math.round(newWidthPx), minWidth, usableWidth);
   const customWidthRatio = Number(
-    clamp(clampedWidthPx / usableWidth, 0.25, 1.0).toFixed(4)
+    (clampedWidthPx / usableWidth).toFixed(4)
   );
   const closestPreset = inferClosestWidthPreset(customWidthRatio);
 
@@ -1509,22 +1512,21 @@ export function resolveThreeFingerSwipeRelease(
     // Natural touch: swipe fingers LEFT (totalFingerDeltaX < 0) -> go to NEXT column on the right (+1)
     // Swipe fingers RIGHT (totalFingerDeltaX > 0) -> go to PREVIOUS column on the left (-1)
     const direction: -1 | 1 = totalFingerDeltaX < 0 ? 1 : -1;
-    const activeColIdx = state.focusedWindowId
-      ? state.columns.findIndex((c) => c.windowIds.includes(state.focusedWindowId!))
-      : 0;
+    const activeColumns = [...new Set(layout.placements.map((p) => p.columnId))];
+    const focusedPlacement = state.focusedWindowId
+      ? layout.placementByWindowId[state.focusedWindowId]
+      : undefined;
+    const activeColIdx = focusedPlacement
+      ? activeColumns.indexOf(focusedPlacement.columnId)
+      : -1;
     const clampedColIdx = clamp(
       (activeColIdx === -1 ? 0 : activeColIdx) + direction,
       0,
-      Math.max(0, state.columns.length - 1)
+      activeColumns.length - 1
     );
-    const targetCol = state.columns[clampedColIdx];
-    const targetWinId =
-      targetCol?.windowIds.find((id) => {
-        const w = state.windows[id];
-        return w && !w.isMinimized && !w.isPinnedPip;
-      }) ??
-      targetCol?.windowIds[0] ??
-      state.focusedWindowId;
+    const targetWinId = layout.placements.find(
+      (p) => p.columnId === activeColumns[clampedColIdx]
+    )?.windowId;
 
     const nextState = targetWinId
       ? focusWindowAndScroll(state, targetWinId)

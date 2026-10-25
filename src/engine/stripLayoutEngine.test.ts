@@ -4,6 +4,7 @@ import {
   DEFAULT_TAB_A11_PLUS_CONFIG,
   StripWorkspaceState,
   computeStripLayout,
+  focusWindowAndScroll,
   computeScrollToFocusWindow,
   cycleFocusHorizontal,
   cycleActiveColumnWidth,
@@ -325,6 +326,41 @@ test('3-finger gesture engine supports continuous 90Hz pan, fast fling column sw
   assert.equal(magneticSnap.isFling, false);
   assert.equal(magneticSnap.gestureAction, 'magnetic_column_snap');
   assert.equal(magneticSnap.nextState.focusedWindowId, 'w2');
+});
+
+test('resizing respects the requested minimum width and narrow viewports', () => {
+  for (const viewportWidth of [1920, 320]) {
+    const state = createSampleState();
+    state.config.viewportWidth = viewportWidth;
+    const usableWidth = viewportWidth - state.config.outerMarginPx * 2;
+    const resized = resizeWindowInStrip(state, {
+      windowId: 'w1', newWidthPx: 380, newHeightPx: 500,
+    });
+    const rect = computeStripLayout(resized).placementByWindowId.w1.stripRect;
+    assert.equal(rect.right - rect.left, Math.min(380, usableWidth));
+    const originalRect = computeStripLayout(state).placementByWindowId.w1.stripRect;
+    assert.ok(originalRect.right - originalRect.left <= usableWidth);
+  }
+});
+
+test('focusing a pinned window restores it to the strip', () => {
+  const state = createSampleState();
+  state.windows.w2.isPinnedPip = true;
+  const focused = focusWindowAndScroll(state, 'w2');
+  assert.equal(focused.windows.w2.isPinnedPip, false);
+  assert.ok(computeStripLayout(focused).placementByWindowId.w2);
+});
+
+test('three-finger fling skips minimized and pinned columns', () => {
+  for (const flag of ['isMinimized', 'isPinnedPip'] as const) {
+    const state = createSampleState();
+    state.windows.w2[flag] = true;
+    const next = resolveThreeFingerSwipeRelease(state, -240, 180).nextState;
+    assert.equal(next.focusedWindowId, 'w3');
+    assert.equal(next.windows.w2[flag], true);
+    const previous = resolveThreeFingerSwipeRelease(next, 240, 180).nextState;
+    assert.equal(previous.focusedWindowId, 'w1');
+  }
 });
 
 
